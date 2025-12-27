@@ -2,21 +2,14 @@
 # SpeedTestSKT Metric Comparator (Ping / Uplink TP / Downlink TP)
 # - Paste or File, No matplotlib
 #
-# Version: 1.6.1  (2025-12-27)
+# Version: 1.6.2  (2025-12-27)
 # Versioning: MAJOR.MINOR.PATCH (SemVer)
 #
-# Release Notes (v1.6.1):
-# - (Fix) Uplink/Downlink TP 실제 로그 포맷 반영:
-#     * DL: "Down-Avg=..." , "Down-AvgResult=..."
-#     * UL: "Up-Avg=..."   , "Up-AvgResult=..."
-# - (Fix) 숫자 파싱에서 천단위 구분자 ',' 는 optional -> 제거 후 float 변환
-# - (Keep) Metric Selector 라디오: Ping / Uplink TP / Downlink TP
-# - (Keep) Summary A/B: 파일 로드 시 [File] <dumpState 파일명> 자동 표기 + 붙여넣기 지원
-# - (Keep) Compare Now: Mean/Delta + Mean Bar / Series Line(Canvas)
-#
-# Notes:
-# - 기본 비교값은 각 Metric의 "*-AvgResult" (Ping-AvgResult / Up-AvgResult / Down-AvgResult)
-#   필요 시 "*-Avg"도 토글로 확장 가능
+# Release Notes (v1.6.2):
+# - (UX) Mean Bar 그래프에서 Title/Delta가 막대/값 라벨과 겹치지 않도록 레이아웃 개선
+#     * Canvas 상단에 Header 영역을 분리 확보
+#     * Title/Delta는 Header에만 표시
+#     * Plot 영역(top_y)을 아래로 내려 겹침 방지
 # ============================================================
 
 import re
@@ -24,9 +17,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from pathlib import Path
 
-# -----------------------------
-# Common patterns
-# -----------------------------
 DATE_RE = re.compile(r"(?P<date>(?:\d{4}-\d{2}-\d{2})|(?:\d{2}-\d{2}))")
 TIME_RE = re.compile(r"(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d{3,6})?)")
 SPEEDTEST_RE = re.compile(r"(?P<msg>SpeedTestSKT\s*:\s*.*)$")
@@ -49,14 +39,6 @@ def _normalize_display_msg(raw_msg: str):
     return msg
 
 def _to_float_num(s):
-    """
-    Accepts:
-      - "1,234"
-      - "1234"
-      - "1234.56"
-      - "1,234.56"
-    Removes commas, then float().
-    """
     if s is None:
         return None
     s = str(s).strip()
@@ -68,33 +50,21 @@ def _to_float_num(s):
     except ValueError:
         return None
 
-# -----------------------------
-# Metric spec
-# -----------------------------
 class MetricSpec:
     def __init__(self, key_label, avg_result_token):
-        """
-        avg_result_token examples:
-          - Ping-AvgResult
-          - Up-AvgResult
-          - Down-AvgResult
-        """
         self.key_label = key_label
         self.avg_result_token = avg_result_token
 
-        # file filter: SpeedTestSKT: TestData ... <token> ...
         self.file_filter = re.compile(
             rf"SpeedTestSKT\s*:\s*TestData\b.*\b{re.escape(self.avg_result_token)}\b",
             re.IGNORECASE
         )
 
-        # extract numeric after '=' allowing commas/decimals
         self.file_value_re = re.compile(
             rf"\b{re.escape(self.avg_result_token)}\b\s*=\s*(?P<val>[\d,]+(?:\.\d+)?)",
             re.IGNORECASE
         )
 
-        # paste parsing (permissive line match)
         self.paste_line_re = re.compile(rf"\b{re.escape(self.avg_result_token)}\b.*", re.IGNORECASE)
         self.paste_value_re = re.compile(
             rf"\b{re.escape(self.avg_result_token)}\b.*?(?:=|\s)(?P<val>[\d,]+(?:\.\d+)?)\b",
@@ -107,22 +77,13 @@ class MetricSpec:
             return ""
         return m.group("val") or ""
 
-# Metric map (TP real tokens applied)
 METRICS = {
     "PING": MetricSpec("Ping", "Ping-AvgResult"),
     "UL":   MetricSpec("Uplink TP", "Up-AvgResult"),
     "DL":   MetricSpec("Downlink TP", "Down-AvgResult"),
 }
 
-# -----------------------------
-# File-based extraction (AvgResult lines only)
-# -----------------------------
 def extract_avgresult_lines_from_file(path: Path, spec: MetricSpec):
-    """
-    Returns:
-      lines: list[str]  (display lines containing SpeedTestSKT:...)
-      values: list[float]
-    """
     lines = []
     values = []
 
@@ -143,8 +104,7 @@ def extract_avgresult_lines_from_file(path: Path, spec: MetricSpec):
                 continue
 
             display_msg = _normalize_display_msg(raw_msg)
-            display_line = f"{date} {time} {display_msg}"
-            lines.append(display_line)
+            lines.append(f"{date} {time} {display_msg}")
 
             v = _to_float_num(spec.extract_value_from_msg(raw_msg))
             if v is not None:
@@ -152,17 +112,9 @@ def extract_avgresult_lines_from_file(path: Path, spec: MetricSpec):
 
     return lines, values
 
-# -----------------------------
-# Summary text parsing (paste or loaded)
-# -----------------------------
 def summarize_from_text(text: str, spec: MetricSpec):
-    """
-    Parse Summary A/B text and extract:
-      - optional [File] <name>
-      - metric AvgResult lines + numeric values (order preserved)
-    """
     source_name = "Pasted"
-    metric_name_in_text = None  # optional; not required
+    metric_name_in_text = None
     avg_lines = []
     values = []
 
@@ -195,28 +147,36 @@ def summarize_from_text(text: str, spec: MetricSpec):
     mean_val = (sum(values) / len(values)) if values else None
     return source_name, metric_name_in_text, avg_lines, values, mean_val
 
-# -----------------------------
-# Canvas drawing
-# -----------------------------
 def _canvas_dims():
     w = int(chart.winfo_width() or 900)
     h = int(chart.winfo_height() or 250)
     return w, h
 
 def draw_mean_bar(a_mean, b_mean, delta_pct, a_name, b_name, title):
+    """
+    Layout:
+      - Header band at top: Title and Delta
+      - Plot area below: axes + bars + value labels
+    """
     chart.delete("all")
     w, h = _canvas_dims()
 
     pad = 20
+    header_h = 42          # reserved space for title/delta
+    plot_top = header_h + 18
     base_y = h - 55
-    top_y = 22
 
+    # Header band (outside plot)
     chart.create_text(w // 2, 12, text=title)
-    chart.create_line(pad, base_y, w - pad, base_y)
-    chart.create_line(pad, base_y, pad, top_y)
+    if delta_pct is not None:
+        chart.create_text(w // 2, 28, text=f"Delta: {delta_pct:+.2f}% (B vs A)")
+
+    # Axes in plot area
+    chart.create_line(pad, base_y, w - pad, base_y)      # x axis
+    chart.create_line(pad, base_y, pad, plot_top)        # y axis
 
     if a_mean is None or b_mean is None:
-        chart.create_text(w // 2, h // 2, text="Load/Paste both A and B, then Compare Now")
+        chart.create_text(w // 2, (plot_top + base_y) // 2, text="Load/Paste both A and B, then Compare Now")
         return
 
     max_val = max(a_mean, b_mean)
@@ -229,23 +189,30 @@ def draw_mean_bar(a_mean, b_mean, delta_pct, a_name, b_name, title):
     x_b = x_a + bar_w + gap
 
     def bar_height(v):
-        usable = base_y - top_y - 10
+        usable = base_y - plot_top - 10
         return (v / max_val) * usable
 
     ha = bar_height(a_mean)
     hb = bar_height(b_mean)
 
+    # Bars
     chart.create_rectangle(x_a, base_y - ha, x_a + bar_w, base_y, outline="")
     chart.create_rectangle(x_b, base_y - hb, x_b + bar_w, base_y, outline="")
 
+    # X labels
     chart.create_text(x_a + bar_w/2, base_y + 16, text=f"A: {a_name}")
     chart.create_text(x_b + bar_w/2, base_y + 16, text=f"B: {b_name}")
 
-    chart.create_text(x_a + bar_w/2, base_y - ha - 12, text=f"{a_mean:.4f}")
-    chart.create_text(x_b + bar_w/2, base_y - hb - 12, text=f"{b_mean:.4f}")
+    # Value labels: clamp to stay within plot area (not into header)
+    def value_label_y(bar_top_y):
+        y = bar_top_y - 12
+        min_y = plot_top + 8
+        if y < min_y:
+            y = min_y
+        return y
 
-    if delta_pct is not None:
-        chart.create_text(w // 2, 28, text=f"Delta: {delta_pct:+.2f}% (B vs A)")
+    chart.create_text(x_a + bar_w/2, value_label_y(base_y - ha), text=f"{a_mean:.4f}")
+    chart.create_text(x_b + bar_w/2, value_label_y(base_y - hb), text=f"{b_mean:.4f}")
 
 def draw_series_line(a_vals, b_vals, a_name, b_name, title):
     chart.delete("all")
@@ -283,14 +250,12 @@ def draw_series_line(a_vals, b_vals, a_name, b_name, title):
     def y_pos(v):
         return bottom - ((v - vmin) / (vmax - vmin)) * (bottom - top)
 
-    # y ticks
     for k in range(5):
         y = top + (k / 4) * (bottom - top)
         chart.create_line(left - 5, y, left + 5, y)
         val = vmax - (k / 4) * (vmax - vmin)
         chart.create_text(left - 10, y, text=f"{val:.2f}", anchor="e")
 
-    # legend
     chart.create_text(left + 5, bottom + 25, text=f"A: {a_name} (o)", anchor="w")
     chart.create_text(left + 5, bottom + 40, text=f"B: {b_name} (□)", anchor="w")
 
@@ -310,16 +275,12 @@ def draw_series_line(a_vals, b_vals, a_name, b_name, title):
     plot(a_vals, marker="circle")
     plot(b_vals, marker="square")
 
-    # x ticks
     for k in range(5):
         i = int(round(k * (n - 1) / 4))
         x = x_pos(i)
         chart.create_line(x, bottom - 5, x, bottom + 5)
         chart.create_text(x, bottom + 15, text=str(i + 1))
 
-# -----------------------------
-# UI logic
-# -----------------------------
 def current_spec():
     return METRICS[metric_kind.get()]
 
@@ -345,12 +306,8 @@ def load_b_from_file():
 
 def fill_summary_from_file(which):
     spec = current_spec()
-    if which == "A":
-        p = Path(path_a.get())
-        box = summary_a
-    else:
-        p = Path(path_b.get())
-        box = summary_b
+    p = Path(path_a.get()) if which == "A" else Path(path_b.get())
+    box = summary_a if which == "A" else summary_b
 
     if not p.exists():
         messagebox.showerror("Error", f"Invalid file for {which}")
@@ -395,17 +352,13 @@ def compare_now():
         draw_series_line(a_vals, b_vals, a_name, b_name, title)
 
 def on_metric_change():
-    # Metric 바꿔도 Summary 내용은 그대로 두고, Compare Now 시 새 metric 토큰으로만 다시 파싱
     compare_now()
 
 def on_mode_change():
     compare_now()
 
-# -----------------------------
-# UI
-# -----------------------------
 root = tk.Tk()
-root.title("SpeedTestSKT Metric Comparator (Ping / UL TP / DL TP) - No matplotlib")
+root.title("SpeedTestSKT Metric Comparator (No matplotlib)")
 root.geometry("1150x900")
 
 metric_kind = tk.StringVar(value="PING")
