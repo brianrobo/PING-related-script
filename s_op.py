@@ -1,25 +1,17 @@
 # ============================================================
-# SpeedTestSKT Ping Log Extractor & Comparator (GUI)
+# SpeedTestSKT Ping Log Extractor & Comparator (GUI, No matplotlib)
 #
-# Version: 1.3.0  (2025-12-27)
+# Version: 1.3.1  (2025-12-27)
 # Versioning: MAJOR.MINOR.PATCH (SemVer)
 #
-# Release Notes (v1.3.0):
-# - (Feature) Summary 비교 기능 추가:
-#     * Log A / Log B를 각각 선택
-#     * Ping-AvgResult만 모아서 각 Summary 창에 출력
-#     * AvgResult 평균(A_mean, B_mean) 비교 -> Delta(%) 계산/표시
-# - (Feature) 그래프 표시:
-#     * A_mean vs B_mean 막대 그래프
-#     * Delta(%) 텍스트로 함께 표시
+# Release Notes (v1.3.1):
+# - (Fix) matplotlib 미설치 환경 지원: 외부 라이브러리 없이 Tkinter Canvas로 그래프(막대) 직접 표시
+# - (Feature) Log A / Log B AvgResult summary 비교 및 Delta(%) 계산/표시
 # - (Keep) 메인 출력창에서 Ping-AvgResult 출력 후 빈 줄(개행) 추가
 # - (Keep) logcat 형태(시간 뒤 PID/TID/토큰 가변, 공백/탭 가변) 안정 추출:
 #     * 날짜/시간과 SpeedTestSKT 태그를 독립적으로 탐색
 # - (Keep) SpeedTestSKT: 이후 메시지는 raw_msg로 원문 유지
 # - (Keep) display/type에서 Ping-request/response를 Ping-Request/Ping-Response로 표준화
-#
-# Requirements:
-# - matplotlib 설치 필요 (대부분 환경에 존재). 없으면: pip install matplotlib
 # ============================================================
 
 import re
@@ -28,20 +20,12 @@ from tkinter import filedialog, messagebox, scrolledtext
 from pathlib import Path
 import csv
 
-import matplotlib
-matplotlib.use("TkAgg")
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-
 # ------------------------------------------------------------
 # Regex (robust, decoupled)
 # ------------------------------------------------------------
 
 DATE_RE = re.compile(r"(?P<date>(?:\d{4}-\d{2}-\d{2})|(?:\d{2}-\d{2}))")
 TIME_RE = re.compile(r"(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d{3,6})?)")
-
-# allow optional spaces before colon
 SPEEDTEST_RE = re.compile(r"(?P<msg>SpeedTestSKT\s*:\s*.*)$")
 
 PING_MSG_FILTER = re.compile(
@@ -57,7 +41,6 @@ AVG_RE  = re.compile(r"Ping-AvgResult\s*=?\s*([\d.]+)?")
 
 REQ_NORM_RE  = re.compile(r"Ping-[Rr]equest")
 RESP_NORM_RE = re.compile(r"Ping-[Rr]esponse")
-
 
 # ------------------------------------------------------------
 # Helpers
@@ -88,9 +71,6 @@ def _to_float(s):
         return None
 
 
-# ------------------------------------------------------------
-# Core extraction
-# ------------------------------------------------------------
 def extract_ping_logs(log_path: Path):
     rows = []
     with log_path.open("r", encoding="utf-8", errors="ignore") as f:
@@ -105,8 +85,7 @@ def extract_ping_logs(log_path: Path):
             if not m:
                 continue
 
-            raw_msg = m.group("msg")  # keep original SpeedTestSKT... part
-
+            raw_msg = m.group("msg")
             if not PING_MSG_FILTER.search(raw_msg):
                 continue
 
@@ -142,12 +121,10 @@ def extract_ping_logs(log_path: Path):
                 "raw_msg": raw_msg,
                 "display": f"{date} {time} {display_msg}",
             })
-
     return rows
 
 
 def summarize_avgresults(rows):
-    """Return (avg_rows, numeric_values, mean or None)."""
     avg_rows = [r for r in rows if r["type"] == "Ping-AvgResult"]
     values = []
     for r in avg_rows:
@@ -156,6 +133,88 @@ def summarize_avgresults(rows):
             values.append(v)
     mean_val = (sum(values) / len(values)) if values else None
     return avg_rows, values, mean_val
+
+
+# ------------------------------------------------------------
+# Simple Canvas Bar Chart (No external libs)
+# ------------------------------------------------------------
+def draw_bar_chart(a_mean, b_mean, delta_pct):
+    chart.delete("all")
+
+    w = int(chart.winfo_width() or 900)
+    h = int(chart.winfo_height() or 220)
+
+    pad = 20
+    base_y = h - 40
+    top_y = 20
+
+    # axes
+    chart.create_line(pad, base_y, w - pad, base_y)  # x axis
+    chart.create_line(pad, base_y, pad, top_y)       # y axis
+
+    if a_mean is None or b_mean is None:
+        chart.create_text(w // 2, h // 2, text="Load both Log A and Log B to compare")
+        return
+
+    max_val = max(a_mean, b_mean)
+    if max_val <= 0:
+        max_val = 1.0
+
+    # bar settings
+    bar_w = 120
+    gap = 120
+    x_a = pad + 120
+    x_b = x_a + bar_w + gap
+
+    def bar_height(v):
+        usable = base_y - top_y - 10
+        return (v / max_val) * usable
+
+    ha = bar_height(a_mean)
+    hb = bar_height(b_mean)
+
+    # Bars (default canvas color)
+    chart.create_rectangle(x_a, base_y - ha, x_a + bar_w, base_y, outline="")
+    chart.create_rectangle(x_b, base_y - hb, x_b + bar_w, base_y, outline="")
+
+    # Labels
+    chart.create_text(x_a + bar_w/2, base_y + 15, text="A")
+    chart.create_text(x_b + bar_w/2, base_y + 15, text="B")
+
+    chart.create_text(x_a + bar_w/2, base_y - ha - 12, text=f"{a_mean:.4f}")
+    chart.create_text(x_b + bar_w/2, base_y - hb - 12, text=f"{b_mean:.4f}")
+
+    if delta_pct is not None:
+        chart.create_text(w // 2, 12, text=f"Delta: {delta_pct:+.2f}% (B vs A)")
+
+    # y ticks (simple)
+    for i in range(1, 5):
+        y = base_y - (i/4) * (base_y - top_y - 10)
+        chart.create_line(pad - 5, y, pad + 5, y)
+        tick_val = (i/4) * max_val
+        chart.create_text(pad + 35, y, text=f"{tick_val:.2f}")
+
+
+def update_compare_view():
+    a = comp_state.get("A_mean")
+    b = comp_state.get("B_mean")
+
+    a_txt = f"{a:.6f}" if a is not None else "N/A"
+    b_txt = f"{b:.6f}" if b is not None else "N/A"
+
+    label_a_mean.config(text=f"A Mean: {a_txt}   (n={comp_state.get('A_count', 0)})")
+    label_b_mean.config(text=f"B Mean: {b_txt}   (n={comp_state.get('B_count', 0)})")
+
+    if a is not None and b is not None and a != 0:
+        delta_pct = ((b - a) / a) * 100.0
+        label_delta.config(text=f"Delta: {delta_pct:+.2f}%   (B vs A)")
+        draw_bar_chart(a, b, delta_pct)
+    elif a is not None and b is not None and a == 0:
+        label_delta.config(text="Delta: N/A (A mean is 0)")
+        draw_bar_chart(a, b, None)
+    else:
+        label_delta.config(text="Delta: N/A (load both A and B)")
+        draw_bar_chart(None, None, None)
 
 
 # ------------------------------------------------------------
@@ -257,7 +316,6 @@ def load_and_summarize(which):
     rows = extract_ping_logs(path)
     avg_rows, values, mean_val = summarize_avgresults(rows)
 
-    # store
     if which == "A":
         comp_state["A_rows"] = rows
         comp_state["A_mean"] = mean_val
@@ -267,7 +325,6 @@ def load_and_summarize(which):
         comp_state["B_mean"] = mean_val
         comp_state["B_count"] = len(values)
 
-    # print AvgResult only
     for r in avg_rows:
         out.insert(tk.END, r["display"] + "\n")
 
@@ -277,63 +334,12 @@ def load_and_summarize(which):
     update_compare_view()
 
 
-def update_compare_view():
-    """Compute delta and refresh labels + chart if A and B are loaded."""
-    a = comp_state.get("A_mean")
-    b = comp_state.get("B_mean")
-
-    # Update numeric labels even if one side missing
-    a_txt = f"{a:.6f}" if a is not None else "N/A"
-    b_txt = f"{b:.6f}" if b is not None else "N/A"
-    label_a_mean.config(text=f"A Mean: {a_txt}   (n={comp_state.get('A_count', 0)})")
-    label_b_mean.config(text=f"B Mean: {b_txt}   (n={comp_state.get('B_count', 0)})")
-
-    # Delta
-    if a is not None and b is not None:
-        if a == 0:
-            delta_txt = "Delta: N/A (A mean is 0)"
-            delta_pct = None
-        else:
-            delta_pct = ((b - a) / a) * 100.0
-            delta_txt = f"Delta: {delta_pct:+.2f}%   (B vs A)"
-        label_delta.config(text=delta_txt)
-        redraw_chart(a, b, delta_pct)
-    else:
-        label_delta.config(text="Delta: N/A (load both A and B)")
-        redraw_chart(None, None, None)
-
-
-def redraw_chart(a_mean, b_mean, delta_pct):
-    ax.clear()
-    ax.set_title("AvgResult Mean Comparison")
-
-    if a_mean is None or b_mean is None:
-        ax.text(0.5, 0.5, "Load both Log A and Log B", ha="center", va="center", transform=ax.transAxes)
-        ax.set_xticks([])
-        ax.set_yticks([])
-    else:
-        labels = ["A", "B"]
-        vals = [a_mean, b_mean]
-        ax.bar(labels, vals)  # no explicit colors (policy)
-        ax.set_ylabel("Mean AvgResult")
-
-        # annotate values
-        for i, v in enumerate(vals):
-            ax.text(i, v, f"{v:.4f}", ha="center", va="bottom")
-
-        # delta text
-        if delta_pct is not None:
-            ax.text(0.5, 0.95, f"Delta: {delta_pct:+.2f}%", ha="center", va="top", transform=ax.transAxes)
-
-    canvas.draw_idle()
-
-
 # ------------------------------------------------------------
 # UI setup
 # ------------------------------------------------------------
 root = tk.Tk()
-root.title("SpeedTestSKT Ping Log Extractor & Comparator")
-root.geometry("1100x850")
+root.title("SpeedTestSKT Ping Log Extractor & Comparator (No matplotlib)")
+root.geometry("1100x880")
 
 # State
 main_log_file = tk.StringVar()
@@ -366,19 +372,15 @@ main_output.pack(fill="both", expand=False, padx=8, pady=(0, 8))
 frame_comp = tk.LabelFrame(root, text="2) Compare Summaries (Log A vs Log B)")
 frame_comp.pack(fill="both", expand=True, padx=10, pady=8)
 
-# Controls row
 ctrl = tk.Frame(frame_comp)
 ctrl.pack(fill="x", padx=8, pady=6)
 
-# Log A selector
 tk.Entry(ctrl, textvariable=log_a_path).pack(side="left", fill="x", expand=True)
 tk.Button(ctrl, text="Browse A", command=open_log_a).pack(side="left", padx=6)
 
-# Log B selector
 tk.Entry(ctrl, textvariable=log_b_path).pack(side="left", fill="x", expand=True)
 tk.Button(ctrl, text="Browse B", command=open_log_b).pack(side="left", padx=6)
 
-# Summary panes
 pane = tk.Frame(frame_comp)
 pane.pack(fill="both", expand=True, padx=8, pady=6)
 
@@ -396,7 +398,6 @@ tk.Label(right, text="Summary B (Ping-AvgResult Only)").pack(anchor="w")
 summary_b = scrolledtext.ScrolledText(right, font=("Consolas", 10), height=10)
 summary_b.pack(fill="both", expand=True)
 
-# Metrics + chart
 metrics = tk.Frame(frame_comp)
 metrics.pack(fill="x", padx=8, pady=6)
 
@@ -409,14 +410,17 @@ label_b_mean.pack(anchor="w")
 label_delta = tk.Label(metrics, text="Delta: N/A (load both A and B)")
 label_delta.pack(anchor="w", pady=(0, 6))
 
-# Chart (Matplotlib embed)
-fig = Figure(figsize=(6.5, 3.0), dpi=100)
-ax = fig.add_subplot(111)
-canvas = FigureCanvasTkAgg(fig, master=frame_comp)
-canvas_widget = canvas.get_tk_widget()
-canvas_widget.pack(fill="x", padx=8, pady=(0, 10))
+# Canvas chart
+chart = tk.Canvas(frame_comp, height=220)
+chart.pack(fill="x", padx=8, pady=(0, 10))
 
-# Initialize chart
-redraw_chart(None, None, None)
+# redraw on resize
+def _on_chart_resize(_evt):
+    update_compare_view()
+
+chart.bind("<Configure>", _on_chart_resize)
+
+# initial chart
+draw_bar_chart(None, None, None)
 
 root.mainloop()
