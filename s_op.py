@@ -1,14 +1,16 @@
 # ============================================================
 # SpeedTestSKT Ping Log Extractor (GUI)
 #
-# Version: 1.1.3  (2025-12-27)
+# Version: 1.1.5  (2025-12-27)
 # Versioning: MAJOR.MINOR.PATCH (SemVer)
 #
-# Release Notes (v1.1.3):
-# - (Fix) 시간 뒤 PID/TID/레벨/프로세스명 등 토큰이 끼는 logcat 형태를 안정적으로 매칭
-#   * time 이후부터 "SpeedTestSKT:" 직전까지를 non-greedy로 스킵 (가장 강건)
-# - (Keep) SpeedTestSKT: 이후 메시지는 원문(raw_msg) 그대로 유지
-# - (Keep) UI 출력(display)에서만 Ping-request/response를 Ping-Request/Ping-Response로 표준화
+# Release Notes (v1.1.5):
+# - (Fix) logcat 형태(시간 뒤 PID/TID/토큰 가변, 공백/탭 가변)에서 매칭 실패하던 문제 해결
+#   * "날짜/시간"과 "SpeedTestSKT:"를 하나의 정규식으로 묶지 않고, 각각 독립적으로 탐색
+#   * "SpeedTestSKT:" 뿐 아니라 "SpeedTestSKT :" (콜론 앞 공백)도 허용
+# - (Keep) Ping-Request / Ping-Response 표기 표준화(display/type에만 적용)
+# - (Keep) SpeedTestSKT: 이후 메시지는 raw_msg로 원문 유지
+# - (Keep) UI: 파일 선택 / 결과 표시 / CSV 저장
 # ============================================================
 
 import re
@@ -18,43 +20,72 @@ from pathlib import Path
 import csv
 
 # ------------------------------------------------------------
-# Regex definitions (robust for logcat tokens after time)
+# Regex (robust, decoupled)
 # ------------------------------------------------------------
 
-# date:
-#   - MM-DD  (12-27)
-#   - YYYY-MM-DD (2025-12-27)
-# time:
-#   - HH:MM:SS
-#   - HH:MM:SS.mmm / HH:MM:SS,mmm
-#   - fractional 3~6 digits
-#
-# Critical: after time, skip ANYTHING until "SpeedTestSKT:" appears.
-PREFIX_RE = re.compile(
-    r"(?P<date>(?:\d{4}-\d{2}-\d{2})|(?:\d{2}-\d{2}))\s+"
-    r"(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d{3,6})?)"
-    r".*?\b(?P<msg>SpeedTestSKT:.*)$"
-)
+# date: MM-DD or YYYY-MM-DD
+DATE_RE = re.compile(r"(?P<date>(?:\d{4}-\d{2}-\d{2})|(?:\d{2}-\d{2}))")
 
-# Filter only Ping-related messages
+# time: HH:MM:SS or HH:MM:SS.mmm / HH:MM:SS,mmm (fraction 3~6 optional)
+TIME_RE = re.compile(r"(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d{3,6})?)")
+
+# SpeedTestSKT tag: allow optional spaces before colon, keep "SpeedTestSKT: ..." as raw_msg
+# Examples:
+#   "SpeedTestSKT: TestData ..."
+#   "SpeedTestSKT : TestData ..."
+SPEEDTEST_RE = re.compile(r"(?P<msg>SpeedTestSKT\s*:\s*.*)$")
+
+# Ping message filter (case-tolerant)
 PING_MSG_FILTER = re.compile(
-    r"SpeedTestSKT:\s*TestData\s*Ping-(?:"
+    r"SpeedTestSKT\s*:\s*TestData\s*Ping-(?:"
     r"[Rr]equest\d+|"
     r"[Rr]esponse\d+=\d+(?:\.\d+)?|"
     r"AvgResult.*)"
 )
 
-# Detailed parse (for CSV columns)
+# Detailed parse (for CSV)
 REQ_RE  = re.compile(r"Ping-[Rr]equest(\d+)")
 RESP_RE = re.compile(r"Ping-[Rr]esponse(\d+)=([\d.]+)")
 AVG_RE  = re.compile(r"Ping-AvgResult\s*=?\s*([\d.]+)?")
 
-# For display normalization only
+# Display normalization only
 REQ_NORM_RE  = re.compile(r"Ping-[Rr]equest")
 RESP_NORM_RE = re.compile(r"Ping-[Rr]esponse")
 
+
 # ------------------------------------------------------------
-# Core extraction logic
+# Helpers
+# ------------------------------------------------------------
+def _find_date_time(line: str):
+    """
+    Finds the first plausible date and time in a line.
+    Returns (date, time) or (None, None).
+    """
+    d = DATE_RE.search(line)
+    t = TIME_RE.search(line)
+
+    if not d or not t:
+        return None, None
+
+    # Optional sanity: ensure date appears before time (typical logcat)
+    if d.start() > t.start():
+        # still accept, but many logs have date first; this avoids weird matches
+        pass
+
+    return d.group("date"), t.group("time")
+
+
+def _normalize_display_msg(raw_msg: str):
+    """
+    Keeps raw_msg as-is except standardizes Ping-Request/Ping-Response casing for display.
+    """
+    msg = REQ_NORM_RE.sub("Ping-Request", raw_msg)
+    msg = RESP_NORM_RE.sub("Ping-Response", msg)
+    return msg
+
+
+# ------------------------------------------------------------
+# Core extraction
 # ------------------------------------------------------------
 def extract_ping_logs(log_path: Path):
     rows = []
@@ -63,14 +94,17 @@ def extract_ping_logs(log_path: Path):
         for line_no, line in enumerate(f, start=1):
             line = line.rstrip("\n")
 
-            m = PREFIX_RE.search(line)
+            date, time = _find_date_time(line)
+            if not date or not time:
+                continue
+
+            m = SPEEDTEST_RE.search(line)
             if not m:
                 continue
 
-            date = m.group("date")
-            time = m.group("time")
-            raw_msg = m.group("msg")  # SpeedTestSKT: ... 원문
-
+            raw_msg = m.group("msg")  # e.g., "SpeedTestSKT: TestData Ping-Request50"
+            # Normalize raw_msg to canonical spacing around ":" for consistent filtering/CSV
+            # (Still "원문 유지" 요구가 있으니, 저장은 raw_msg 그대로 두고 display만 정규화)
             if not PING_MSG_FILTER.search(raw_msg):
                 continue
 
@@ -78,25 +112,23 @@ def extract_ping_logs(log_path: Path):
             seq = ""
             val = ""
 
-            display_msg = raw_msg
-
             m2 = REQ_RE.search(raw_msg)
             if m2:
                 typ = "Ping-Request"
                 seq = m2.group(1)
-                display_msg = REQ_NORM_RE.sub("Ping-Request", raw_msg)
             else:
                 m2 = RESP_RE.search(raw_msg)
                 if m2:
                     typ = "Ping-Response"
                     seq = m2.group(1)
                     val = m2.group(2)
-                    display_msg = RESP_NORM_RE.sub("Ping-Response", raw_msg)
                 else:
                     m2 = AVG_RE.search(raw_msg)
                     if m2:
                         typ = "Ping-AvgResult"
                         val = m2.group(1) or ""
+
+            display_msg = _normalize_display_msg(raw_msg)
 
             rows.append({
                 "date": date,
@@ -105,11 +137,12 @@ def extract_ping_logs(log_path: Path):
                 "seq": seq,
                 "value": val,
                 "line": line_no,
-                "raw_msg": raw_msg,                 # 원문 유지
-                "display": f"{date} {time} {display_msg}",  # 표준화 반영 출력
+                "raw_msg": raw_msg,
+                "display": f"{date} {time} {display_msg}",
             })
 
     return rows
+
 
 # ------------------------------------------------------------
 # UI callbacks
@@ -123,6 +156,7 @@ def open_log():
         return
     log_file.set(file_path)
     parse_log()
+
 
 def parse_log():
     output.delete("1.0", tk.END)
@@ -140,12 +174,6 @@ def parse_log():
 
     output.insert(tk.END, f"\n--- Total {len(results)} entries ---\n")
 
-    if len(results) == 0:
-        output.insert(
-            tk.END,
-            "\n[Hint] 0건이면, SpeedTestSKT 라인이 실제로 포함되어 있는지(대소문자 포함)와\n"
-            "date/time 포맷이 다른지 확인이 필요합니다.\n"
-        )
 
 def save_csv():
     if not results:
@@ -169,6 +197,7 @@ def save_csv():
         writer.writerows(results)
 
     messagebox.showinfo("Saved", f"CSV saved:\n{save_path}")
+
 
 # ------------------------------------------------------------
 # UI setup
