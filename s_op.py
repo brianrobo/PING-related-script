@@ -2,14 +2,14 @@
 # SpeedTestSKT Metric Comparator (Ping / Uplink TP / Downlink TP)
 # - Paste or File, No matplotlib
 #
-# Version: 1.6.2  (2025-12-27)
+# Version: 1.6.4  (2025-12-27)
 # Versioning: MAJOR.MINOR.PATCH (SemVer)
 #
-# Release Notes (v1.6.2):
-# - (UX) Mean Bar 그래프에서 Title/Delta가 막대/값 라벨과 겹치지 않도록 레이아웃 개선
-#     * Canvas 상단에 Header 영역을 분리 확보
-#     * Title/Delta는 Header에만 표시
-#     * Plot 영역(top_y)을 아래로 내려 겹침 방지
+# Release Notes (v1.6.4):
+# - (UX) Compare Now 시, 현재 Metric selector와 Summary(A/B) 내용이 매칭되지 않으면 팝업 경고 표시
+#     * 자동 metric 감지(auto-detect)는 사용하지 않음 (요청 반영)
+#     * A 또는 B에서 선택 metric 값이 0개이면 그래프/델타 갱신 대신 warning popup
+# - (Keep) Mean Bar: Title/Delta 겹침 방지(Header band) 레이아웃 유지
 # ============================================================
 
 import re
@@ -114,8 +114,6 @@ def extract_avgresult_lines_from_file(path: Path, spec: MetricSpec):
 
 def summarize_from_text(text: str, spec: MetricSpec):
     source_name = "Pasted"
-    metric_name_in_text = None
-    avg_lines = []
     values = []
 
     for raw_line in text.splitlines():
@@ -128,15 +126,11 @@ def summarize_from_text(text: str, spec: MetricSpec):
             source_name = mh.group("name").strip()
             continue
 
-        mm = METRIC_HEADER_RE.match(line)
-        if mm:
-            metric_name_in_text = mm.group("name").strip()
+        if METRIC_HEADER_RE.match(line):
             continue
 
         if not spec.paste_line_re.search(line):
             continue
-
-        avg_lines.append(line)
 
         mv = spec.paste_value_re.search(line)
         if mv:
@@ -145,7 +139,7 @@ def summarize_from_text(text: str, spec: MetricSpec):
                 values.append(v)
 
     mean_val = (sum(values) / len(values)) if values else None
-    return source_name, metric_name_in_text, avg_lines, values, mean_val
+    return source_name, values, mean_val
 
 def _canvas_dims():
     w = int(chart.winfo_width() or 900)
@@ -153,30 +147,23 @@ def _canvas_dims():
     return w, h
 
 def draw_mean_bar(a_mean, b_mean, delta_pct, a_name, b_name, title):
-    """
-    Layout:
-      - Header band at top: Title and Delta
-      - Plot area below: axes + bars + value labels
-    """
     chart.delete("all")
     w, h = _canvas_dims()
 
     pad = 20
-    header_h = 42          # reserved space for title/delta
+    header_h = 42
     plot_top = header_h + 18
     base_y = h - 55
 
-    # Header band (outside plot)
     chart.create_text(w // 2, 12, text=title)
     if delta_pct is not None:
         chart.create_text(w // 2, 28, text=f"Delta: {delta_pct:+.2f}% (B vs A)")
 
-    # Axes in plot area
-    chart.create_line(pad, base_y, w - pad, base_y)      # x axis
-    chart.create_line(pad, base_y, pad, plot_top)        # y axis
+    chart.create_line(pad, base_y, w - pad, base_y)
+    chart.create_line(pad, base_y, pad, plot_top)
 
     if a_mean is None or b_mean is None:
-        chart.create_text(w // 2, (plot_top + base_y) // 2, text="Load/Paste both A and B, then Compare Now")
+        chart.create_text(w // 2, (plot_top + base_y) // 2, text="Need numeric values in both A and B")
         return
 
     max_val = max(a_mean, b_mean)
@@ -195,21 +182,16 @@ def draw_mean_bar(a_mean, b_mean, delta_pct, a_name, b_name, title):
     ha = bar_height(a_mean)
     hb = bar_height(b_mean)
 
-    # Bars
     chart.create_rectangle(x_a, base_y - ha, x_a + bar_w, base_y, outline="")
     chart.create_rectangle(x_b, base_y - hb, x_b + bar_w, base_y, outline="")
 
-    # X labels
     chart.create_text(x_a + bar_w/2, base_y + 16, text=f"A: {a_name}")
     chart.create_text(x_b + bar_w/2, base_y + 16, text=f"B: {b_name}")
 
-    # Value labels: clamp to stay within plot area (not into header)
     def value_label_y(bar_top_y):
         y = bar_top_y - 12
         min_y = plot_top + 8
-        if y < min_y:
-            y = min_y
-        return y
+        return max(y, min_y)
 
     chart.create_text(x_a + bar_w/2, value_label_y(base_y - ha), text=f"{a_mean:.4f}")
     chart.create_text(x_b + bar_w/2, value_label_y(base_y - hb), text=f"{b_mean:.4f}")
@@ -233,7 +215,7 @@ def draw_series_line(a_vals, b_vals, a_name, b_name, title):
     chart.create_line(left, bottom, left, top)
 
     if not a_vals and not b_vals:
-        chart.create_text(w // 2, h // 2, text="No numeric values found for selected metric in A/B")
+        chart.create_text(w // 2, h // 2, text="No numeric values found in A/B")
         return
 
     all_vals = (a_vals or []) + (b_vals or [])
@@ -327,12 +309,26 @@ def fill_summary_from_file(which):
 def compare_now():
     spec = current_spec()
 
-    a_name, _, _, a_vals, a_mean = summarize_from_text(summary_a.get("1.0", tk.END), spec)
-    b_name, _, _, b_vals, b_mean = summarize_from_text(summary_b.get("1.0", tk.END), spec)
+    a_name, a_vals, a_mean = summarize_from_text(summary_a.get("1.0", tk.END), spec)
+    b_name, b_vals, b_mean = summarize_from_text(summary_b.get("1.0", tk.END), spec)
+
+    # If mismatch/no data -> popup warning and do not update graph
+    if len(a_vals) == 0 or len(b_vals) == 0:
+        missing = []
+        if len(a_vals) == 0:
+            missing.append("A")
+        if len(b_vals) == 0:
+            missing.append("B")
+        messagebox.showwarning(
+            "Metric mismatch or no data",
+            f"Selected Metric = {spec.key_label}\n\n"
+            f"Summary {', '.join(missing)} has no matching '{spec.avg_result_token}' values.\n"
+            f"Please change Metric selector or paste/load the correct result text."
+        )
+        return
 
     a_txt = f"{a_mean:.6f}" if a_mean is not None else "N/A"
     b_txt = f"{b_mean:.6f}" if b_mean is not None else "N/A"
-
     label_a_mean.config(text=f"A ({a_name}) Mean: {a_txt}   (n={len(a_vals)})")
     label_b_mean.config(text=f"B ({b_name}) Mean: {b_txt}   (n={len(b_vals)})")
 
@@ -352,10 +348,13 @@ def compare_now():
         draw_series_line(a_vals, b_vals, a_name, b_name, title)
 
 def on_metric_change():
-    compare_now()
+    # no auto-compare; optional: comment out if you don't want this
+    # compare_now()
+    pass
 
 def on_mode_change():
-    compare_now()
+    # keep current; don't auto-run if user hasn't compared yet
+    pass
 
 root = tk.Tk()
 root.title("SpeedTestSKT Metric Comparator (No matplotlib)")
@@ -367,9 +366,9 @@ chart_mode = tk.StringVar(value="MEAN")
 top = tk.LabelFrame(root, text="Metric Selector")
 top.pack(fill="x", padx=10, pady=8)
 
-tk.Radiobutton(top, text="Ping", variable=metric_kind, value="PING", command=on_metric_change).pack(side="left", padx=10)
-tk.Radiobutton(top, text="Uplink TP", variable=metric_kind, value="UL", command=on_metric_change).pack(side="left", padx=10)
-tk.Radiobutton(top, text="Downlink TP", variable=metric_kind, value="DL", command=on_metric_change).pack(side="left", padx=10)
+tk.Radiobutton(top, text="Ping", variable=metric_kind, value="PING").pack(side="left", padx=10)
+tk.Radiobutton(top, text="Uplink TP", variable=metric_kind, value="UL").pack(side="left", padx=10)
+tk.Radiobutton(top, text="Downlink TP", variable=metric_kind, value="DL").pack(side="left", padx=10)
 
 frame = tk.LabelFrame(root, text="Compare Summaries (Paste OR Load files)")
 frame.pack(fill="both", expand=True, padx=10, pady=8)
@@ -419,18 +418,13 @@ label_delta.pack(side="left", padx=16)
 mode_frame = tk.Frame(frame)
 mode_frame.pack(fill="x", padx=8, pady=(0, 6))
 
-tk.Radiobutton(mode_frame, text="Mean Bar", variable=chart_mode, value="MEAN", command=on_mode_change).pack(side="left")
-tk.Radiobutton(mode_frame, text="Series Line (each AvgResult)", variable=chart_mode, value="SERIES", command=on_mode_change).pack(side="left", padx=12)
+tk.Radiobutton(mode_frame, text="Mean Bar", variable=chart_mode, value="MEAN").pack(side="left")
+tk.Radiobutton(mode_frame, text="Series Line (each AvgResult)", variable=chart_mode, value="SERIES").pack(side="left", padx=12)
 
 chart = tk.Canvas(frame, height=250)
 chart.pack(fill="x", padx=8, pady=(0, 10))
 
-def _on_chart_resize(_evt):
-    compare_now()
-
-chart.bind("<Configure>", _on_chart_resize)
-
-# initial
+# initial placeholder
 draw_mean_bar(None, None, None, "A", "B", "Metric AvgResult Comparison")
 
 root.mainloop()
