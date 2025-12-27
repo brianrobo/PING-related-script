@@ -1,22 +1,22 @@
 # ============================================================
-# SpeedTestSKT Ping Log Extractor & Comparator (GUI, No matplotlib)
+# SpeedTestSKT Ping Comparator (Paste or File, No matplotlib)
 #
-# Version: 1.4.0  (2025-12-27)
+# Version: 1.4.1  (2025-12-27)
 # Versioning: MAJOR.MINOR.PATCH (SemVer)
 #
-# Release Notes (v1.4.0):
-# - (Feature) Summary A/B에 "파일 결과"뿐 아니라 "사용자 붙여넣기" 텍스트도 지원
-#     * Summary 박스에 과거 결과물을 붙여넣고
-#     * [Compare Now] 버튼을 누르면 A/B를 파싱하여 Mean/Delta/그래프 업데이트
-# - (Keep) 파일 Browse A/B 시에도 Summary 박스에 AvgResult만 자동 채워줌
-# - (Keep) matplotlib 없이 Tkinter Canvas로 막대 그래프 표시
+# Release Notes (v1.4.1):
+# - (Feature) Summary A/B에 로드한 dumpState 파일명(basename) 표기
+#     * Load A/B(파일) 시 Summary 상단에 "[File] <filename>" 라인 추가
+#     * Compare Now 결과 라벨/그래프에도 A/B 파일명(또는 'Pasted') 표기
+# - (Keep) Summary A/B: 파일 결과 자동 채움 + 사용자 붙여넣기 지원
+# - (Keep) Compare Now 버튼: Summary A/B 텍스트를 다시 파싱하여 Mean/Delta/그래프 갱신
+# - (Keep) matplotlib 없이 Tkinter Canvas 그래프
 # ============================================================
 
 import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from pathlib import Path
-import csv
 
 # ------------------------------------------------------------
 # Regex for log extraction (file-based)
@@ -42,9 +42,13 @@ RESP_NORM_RE = re.compile(r"Ping-[Rr]esponse")
 # ------------------------------------------------------------
 # Regex for parsing pasted summary text (more permissive)
 # ------------------------------------------------------------
-# Accept lines that contain Ping-AvgResult and an optional numeric value after '=' or whitespace.
+# - Lines containing "Ping-AvgResult" are collected.
+# - Numeric value is extracted if present after '=' or whitespace.
 PASTE_AVG_LINE_RE = re.compile(r"Ping-AvgResult\b.*", re.IGNORECASE)
 PASTE_AVG_VALUE_RE = re.compile(r"Ping-AvgResult\b.*?(?:=|\s)(?P<val>[\d.]+)\b", re.IGNORECASE)
+
+# Detect optional file header line (we add this when loading)
+PASTE_FILE_HEADER_RE = re.compile(r"^\[File\]\s+(?P<name>.+?)\s*$", re.IGNORECASE)
 
 
 # ------------------------------------------------------------
@@ -122,7 +126,6 @@ def extract_ping_logs(log_path: Path):
                 "type": typ,
                 "seq": seq,
                 "value": val,
-                "line": line_no,
                 "raw_msg": raw_msg,
                 "display": f"{date} {time} {display_msg}",
             })
@@ -142,18 +145,27 @@ def summarize_avgresults(rows):
 
 def summarize_from_text(text: str):
     """
-    Parse pasted/edited summary text and extract Ping-AvgResult lines + numeric values.
+    Parse Summary text (pasted or loaded) and extract:
+      - optional file header: [File] xxx
+      - Ping-AvgResult lines and numeric values
     Returns:
+      - source_name: str (file name if present else 'Pasted')
       - lines: list[str] (AvgResult lines)
       - values: list[float]
       - mean: float|None
     """
+    source_name = "Pasted"
     lines = []
     values = []
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
+            continue
+
+        mh = PASTE_FILE_HEADER_RE.match(line)
+        if mh:
+            source_name = mh.group("name").strip()
             continue
 
         if not PASTE_AVG_LINE_RE.search(line):
@@ -168,34 +180,37 @@ def summarize_from_text(text: str):
                 values.append(v)
 
     mean_val = (sum(values) / len(values)) if values else None
-    return lines, values, mean_val
+    return source_name, lines, values, mean_val
 
 
 # ------------------------------------------------------------
 # Canvas bar chart (no external libs)
 # ------------------------------------------------------------
-def draw_bar_chart(a_mean, b_mean, delta_pct):
+def draw_bar_chart(a_mean, b_mean, delta_pct, a_name, b_name):
     chart.delete("all")
 
     w = int(chart.winfo_width() or 900)
-    h = int(chart.winfo_height() or 220)
+    h = int(chart.winfo_height() or 200)
 
     pad = 20
-    base_y = h - 40
+    base_y = h - 50
     top_y = 20
 
     chart.create_line(pad, base_y, w - pad, base_y)
     chart.create_line(pad, base_y, pad, top_y)
 
     if a_mean is None or b_mean is None:
-        chart.create_text(w // 2, h // 2, text="Paste/Load both Summary A and Summary B, then click 'Compare Now'")
+        chart.create_text(
+            w // 2, h // 2,
+            text="Paste/Load both Summary A and Summary B, then click 'Compare Now'"
+        )
         return
 
     max_val = max(a_mean, b_mean)
     if max_val <= 0:
         max_val = 1.0
 
-    bar_w = 120
+    bar_w = 140
     gap = 120
     x_a = pad + 120
     x_b = x_a + bar_w + gap
@@ -210,8 +225,9 @@ def draw_bar_chart(a_mean, b_mean, delta_pct):
     chart.create_rectangle(x_a, base_y - ha, x_a + bar_w, base_y, outline="")
     chart.create_rectangle(x_b, base_y - hb, x_b + bar_w, base_y, outline="")
 
-    chart.create_text(x_a + bar_w/2, base_y + 15, text="A")
-    chart.create_text(x_b + bar_w/2, base_y + 15, text="B")
+    # X labels with source names
+    chart.create_text(x_a + bar_w/2, base_y + 15, text=f"A: {a_name}")
+    chart.create_text(x_b + bar_w/2, base_y + 15, text=f"B: {b_name}")
 
     chart.create_text(x_a + bar_w/2, base_y - ha - 12, text=f"{a_mean:.4f}")
     chart.create_text(x_b + bar_w/2, base_y - hb - 12, text=f"{b_mean:.4f}")
@@ -227,38 +243,33 @@ def compare_now():
     text_a = summary_a.get("1.0", tk.END)
     text_b = summary_b.get("1.0", tk.END)
 
-    a_lines, a_vals, a_mean = summarize_from_text(text_a)
-    b_lines, b_vals, b_mean = summarize_from_text(text_b)
-
-    comp_state["A_mean"] = a_mean
-    comp_state["B_mean"] = b_mean
-    comp_state["A_count"] = len(a_vals)
-    comp_state["B_count"] = len(b_vals)
+    a_name, _, a_vals, a_mean = summarize_from_text(text_a)
+    b_name, _, b_vals, b_mean = summarize_from_text(text_b)
 
     a_txt = f"{a_mean:.6f}" if a_mean is not None else "N/A"
     b_txt = f"{b_mean:.6f}" if b_mean is not None else "N/A"
 
-    label_a_mean.config(text=f"A Mean: {a_txt}   (n={len(a_vals)})")
-    label_b_mean.config(text=f"B Mean: {b_txt}   (n={len(b_vals)})")
+    label_a_mean.config(text=f"A ({a_name}) Mean: {a_txt}   (n={len(a_vals)})")
+    label_b_mean.config(text=f"B ({b_name}) Mean: {b_txt}   (n={len(b_vals)})")
 
     if a_mean is not None and b_mean is not None and a_mean != 0:
         delta_pct = ((b_mean - a_mean) / a_mean) * 100.0
         label_delta.config(text=f"Delta: {delta_pct:+.2f}%   (B vs A)")
-        draw_bar_chart(a_mean, b_mean, delta_pct)
+        draw_bar_chart(a_mean, b_mean, delta_pct, a_name, b_name)
     elif a_mean is not None and b_mean is not None and a_mean == 0:
         label_delta.config(text="Delta: N/A (A mean is 0)")
-        draw_bar_chart(a_mean, b_mean, None)
+        draw_bar_chart(a_mean, b_mean, None, a_name, b_name)
     else:
         label_delta.config(text="Delta: N/A (need numeric AvgResult values in both A and B)")
-        draw_bar_chart(None, None, None)
+        draw_bar_chart(None, None, None, a_name, b_name)
 
 
 # ------------------------------------------------------------
-# File loading into Summary A/B (optional convenience)
+# File loading into Summary A/B (convenience)
 # ------------------------------------------------------------
 def open_log_a():
     file_path = filedialog.askopenfilename(
-        title="Select Log A",
+        title="Select Log A (dumpState file)",
         filetypes=[("Log files", "*.txt *.log"), ("All files", "*.*")]
     )
     if not file_path:
@@ -269,7 +280,7 @@ def open_log_a():
 
 def open_log_b():
     file_path = filedialog.askopenfilename(
-        title="Select Log B",
+        title="Select Log B (dumpState file)",
         filetypes=[("Log files", "*.txt *.log"), ("All files", "*.*")]
     )
     if not file_path:
@@ -295,6 +306,9 @@ def load_avg_into_summary(which):
     rows = extract_ping_logs(path)
     avg_rows, values, mean_val = summarize_avgresults(rows)
 
+    # Put file header first
+    out.insert(tk.END, f"[File] {path.name}\n\n")
+
     for r in avg_rows:
         out.insert(tk.END, r["display"] + "\n")
 
@@ -312,9 +326,7 @@ root.geometry("1100x820")
 log_a_path = tk.StringVar()
 log_b_path = tk.StringVar()
 
-comp_state = {"A_mean": None, "B_mean": None, "A_count": 0, "B_count": 0}
-
-frame_comp = tk.LabelFrame(root, text="Compare Summaries (Paste text OR Load logs)")
+frame_comp = tk.LabelFrame(root, text="Compare Summaries (Paste text OR Load dumpState files)")
 frame_comp.pack(fill="both", expand=True, padx=10, pady=10)
 
 ctrl = tk.Frame(frame_comp)
@@ -335,11 +347,11 @@ left.pack(side="left", fill="both", expand=True, padx=(0, 6))
 right = tk.Frame(pane)
 right.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
-tk.Label(left, text="Summary A (Paste here or Load A)").pack(anchor="w")
+tk.Label(left, text="Summary A").pack(anchor="w")
 summary_a = scrolledtext.ScrolledText(left, font=("Consolas", 10), height=18)
 summary_a.pack(fill="both", expand=True)
 
-tk.Label(right, text="Summary B (Paste here or Load B)").pack(anchor="w")
+tk.Label(right, text="Summary B").pack(anchor="w")
 summary_b = scrolledtext.ScrolledText(right, font=("Consolas", 10), height=18)
 summary_b.pack(fill="both", expand=True)
 
@@ -360,7 +372,13 @@ label_delta.pack(side="left", padx=16)
 chart = tk.Canvas(frame_comp, height=200)
 chart.pack(fill="x", padx=8, pady=(0, 10))
 
-# initial
-draw_bar_chart(None, None, None)
+def _on_chart_resize(_evt):
+    # keep last compare view if present; otherwise placeholder
+    compare_now()
+
+chart.bind("<Configure>", _on_chart_resize)
+
+# initial placeholder
+draw_bar_chart(None, None, None, "A", "B")
 
 root.mainloop()
