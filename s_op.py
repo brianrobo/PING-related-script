@@ -1,16 +1,18 @@
 # ============================================================
 # SpeedTestSKT Ping Log Extractor (GUI)
 #
-# Version: 1.1.5  (2025-12-27)
+# Version: 1.2.0  (2025-12-27)
 # Versioning: MAJOR.MINOR.PATCH (SemVer)
 #
-# Release Notes (v1.1.5):
-# - (Fix) logcat 형태(시간 뒤 PID/TID/토큰 가변, 공백/탭 가변)에서 매칭 실패하던 문제 해결
-#   * "날짜/시간"과 "SpeedTestSKT:"를 하나의 정규식으로 묶지 않고, 각각 독립적으로 탐색
-#   * "SpeedTestSKT:" 뿐 아니라 "SpeedTestSKT :" (콜론 앞 공백)도 허용
-# - (Keep) Ping-Request / Ping-Response 표기 표준화(display/type에만 적용)
+# Release Notes (v1.2.0):
+# - (Feature) 메인 출력창에서 Ping-AvgResult 라인 출력 후 빈 줄(개행) 추가
+# - (Feature) UI 하단에 Summary 출력창 추가
+#     * Ping-AvgResult만 모아서 출력
+#     * AvgResult들의 value 평균(Avg of AvgResult) 계산/표시
+# - (Fix) logcat 형태(시간 뒤 PID/TID/토큰 가변, 공백/탭 가변) 안정 추출:
+#     * 날짜/시간과 SpeedTestSKT 태그를 독립적으로 탐색(정규식 결합 실패 방지)
 # - (Keep) SpeedTestSKT: 이후 메시지는 raw_msg로 원문 유지
-# - (Keep) UI: 파일 선택 / 결과 표시 / CSV 저장
+# - (Keep) display/type에서 Ping-request/response를 Ping-Request/Ping-Response로 표준화
 # ============================================================
 
 import re
@@ -29,7 +31,7 @@ DATE_RE = re.compile(r"(?P<date>(?:\d{4}-\d{2}-\d{2})|(?:\d{2}-\d{2}))")
 # time: HH:MM:SS or HH:MM:SS.mmm / HH:MM:SS,mmm (fraction 3~6 optional)
 TIME_RE = re.compile(r"(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d{3,6})?)")
 
-# SpeedTestSKT tag: allow optional spaces before colon, keep "SpeedTestSKT: ..." as raw_msg
+# SpeedTestSKT tag: allow optional spaces before colon
 # Examples:
 #   "SpeedTestSKT: TestData ..."
 #   "SpeedTestSKT : TestData ..."
@@ -57,31 +59,29 @@ RESP_NORM_RE = re.compile(r"Ping-[Rr]esponse")
 # Helpers
 # ------------------------------------------------------------
 def _find_date_time(line: str):
-    """
-    Finds the first plausible date and time in a line.
-    Returns (date, time) or (None, None).
-    """
     d = DATE_RE.search(line)
     t = TIME_RE.search(line)
-
     if not d or not t:
         return None, None
-
-    # Optional sanity: ensure date appears before time (typical logcat)
-    if d.start() > t.start():
-        # still accept, but many logs have date first; this avoids weird matches
-        pass
-
     return d.group("date"), t.group("time")
 
 
 def _normalize_display_msg(raw_msg: str):
-    """
-    Keeps raw_msg as-is except standardizes Ping-Request/Ping-Response casing for display.
-    """
     msg = REQ_NORM_RE.sub("Ping-Request", raw_msg)
     msg = RESP_NORM_RE.sub("Ping-Response", msg)
     return msg
+
+
+def _to_float(s: str):
+    if s is None:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 # ------------------------------------------------------------
@@ -102,9 +102,8 @@ def extract_ping_logs(log_path: Path):
             if not m:
                 continue
 
-            raw_msg = m.group("msg")  # e.g., "SpeedTestSKT: TestData Ping-Request50"
-            # Normalize raw_msg to canonical spacing around ":" for consistent filtering/CSV
-            # (Still "원문 유지" 요구가 있으니, 저장은 raw_msg 그대로 두고 display만 정규화)
+            raw_msg = m.group("msg")  # "SpeedTestSKT: ..." 원문
+
             if not PING_MSG_FILTER.search(raw_msg):
                 continue
 
@@ -160,6 +159,7 @@ def open_log():
 
 def parse_log():
     output.delete("1.0", tk.END)
+    summary_output.delete("1.0", tk.END)
 
     path = Path(log_file.get())
     if not path.exists():
@@ -169,10 +169,31 @@ def parse_log():
     results.clear()
     results.extend(extract_ping_logs(path))
 
+    # ---- Main output ----
     for r in results:
         output.insert(tk.END, r["display"] + "\n")
+        # 요구사항: AvgResult 다음에는 개행(빈 줄) 추가
+        if r["type"] == "Ping-AvgResult":
+            output.insert(tk.END, "\n")
 
     output.insert(tk.END, f"\n--- Total {len(results)} entries ---\n")
+
+    # ---- Summary output: only AvgResult ----
+    avg_rows = [r for r in results if r["type"] == "Ping-AvgResult"]
+    values = []
+    for r in avg_rows:
+        v = _to_float(r.get("value", ""))
+        if v is not None:
+            values.append(v)
+        summary_output.insert(tk.END, r["display"] + "\n")
+
+    summary_output.insert(tk.END, f"\n--- AvgResult Count: {len(avg_rows)} ---\n")
+
+    if values:
+        mean_val = sum(values) / len(values)
+        summary_output.insert(tk.END, f"Avg of AvgResult (mean): {mean_val:.3f}\n")
+    else:
+        summary_output.insert(tk.END, "Avg of AvgResult (mean): N/A (no numeric values)\n")
 
 
 def save_csv():
@@ -204,7 +225,7 @@ def save_csv():
 # ------------------------------------------------------------
 root = tk.Tk()
 root.title("SpeedTestSKT Ping Log Extractor")
-root.geometry("950x600")
+root.geometry("980x720")
 
 log_file = tk.StringVar()
 results = []
@@ -216,7 +237,18 @@ tk.Entry(top, textvariable=log_file).pack(side="left", fill="x", expand=True)
 tk.Button(top, text="Browse", command=open_log).pack(side="left", padx=5)
 tk.Button(top, text="Save CSV", command=save_csv).pack(side="left")
 
-output = scrolledtext.ScrolledText(root, font=("Consolas", 10))
-output.pack(fill="both", expand=True, padx=10, pady=10)
+# Main output (upper)
+main_label = tk.Label(root, text="Extracted Logs")
+main_label.pack(anchor="w", padx=10)
+
+output = scrolledtext.ScrolledText(root, font=("Consolas", 10), height=18)
+output.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+# Summary output (lower)
+summary_label = tk.Label(root, text="Summary (Ping-AvgResult Only)")
+summary_label.pack(anchor="w", padx=10)
+
+summary_output = scrolledtext.ScrolledText(root, font=("Consolas", 10), height=10)
+summary_output.pack(fill="both", expand=False, padx=10, pady=(0, 10))
 
 root.mainloop()
