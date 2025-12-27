@@ -2,13 +2,12 @@
 # SpeedTestSKT Metric Comparator (Ping / Uplink TP / Downlink TP)
 # - Paste or File, No matplotlib
 #
-# Version: 1.6.4  (2025-12-27)
+# Version: 1.6.5  (2025-12-27)
 # Versioning: MAJOR.MINOR.PATCH (SemVer)
 #
-# Release Notes (v1.6.4):
-# - (UX) Compare Now 시, 현재 Metric selector와 Summary(A/B) 내용이 매칭되지 않으면 팝업 경고 표시
-#     * 자동 metric 감지(auto-detect)는 사용하지 않음 (요청 반영)
-#     * A 또는 B에서 선택 metric 값이 0개이면 그래프/델타 갱신 대신 warning popup
+# Release Notes (v1.6.5):
+# - (UX) 앱 실행 시 Window Title에 Version 표시
+# - (Keep) Compare Now: Metric mismatch/no data -> warning popup
 # - (Keep) Mean Bar: Title/Delta 겹침 방지(Header band) 레이아웃 유지
 # ============================================================
 
@@ -16,6 +15,9 @@ import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from pathlib import Path
+
+APP_NAME = "SpeedTestSKT Metric Comparator"
+APP_VERSION = "1.6.5"
 
 DATE_RE = re.compile(r"(?P<date>(?:\d{4}-\d{2}-\d{2})|(?:\d{2}-\d{2}))")
 TIME_RE = re.compile(r"(?P<time>\d{2}:\d{2}:\d{2}(?:[.,]\d{3,6})?)")
@@ -312,7 +314,6 @@ def compare_now():
     a_name, a_vals, a_mean = summarize_from_text(summary_a.get("1.0", tk.END), spec)
     b_name, b_vals, b_mean = summarize_from_text(summary_b.get("1.0", tk.END), spec)
 
-    # If mismatch/no data -> popup warning and do not update graph
     if len(a_vals) == 0 or len(b_vals) == 0:
         missing = []
         if len(a_vals) == 0:
@@ -347,17 +348,11 @@ def compare_now():
     else:
         draw_series_line(a_vals, b_vals, a_name, b_name, title)
 
-def on_metric_change():
-    # no auto-compare; optional: comment out if you don't want this
-    # compare_now()
-    pass
-
-def on_mode_change():
-    # keep current; don't auto-run if user hasn't compared yet
-    pass
-
+# -----------------------------
+# UI
+# -----------------------------
 root = tk.Tk()
-root.title("SpeedTestSKT Metric Comparator (No matplotlib)")
+root.title(f"{APP_NAME} v{APP_VERSION}")
 root.geometry("1150x900")
 
 metric_kind = tk.StringVar(value="PING")
@@ -424,7 +419,6 @@ tk.Radiobutton(mode_frame, text="Series Line (each AvgResult)", variable=chart_m
 chart = tk.Canvas(frame, height=250)
 chart.pack(fill="x", padx=8, pady=(0, 10))
 
-# initial placeholder
 draw_mean_bar(None, None, None, "A", "B", "Metric AvgResult Comparison")
 
 root.mainloop()
