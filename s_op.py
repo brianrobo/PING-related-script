@@ -1,16 +1,16 @@
 # ============================================================
 # SpeedTestSKT Ping Comparator (Paste or File, No matplotlib)
 #
-# Version: 1.4.1  (2025-12-27)
+# Version: 1.5.0  (2025-12-27)
 # Versioning: MAJOR.MINOR.PATCH (SemVer)
 #
-# Release Notes (v1.4.1):
-# - (Feature) Summary A/B에 로드한 dumpState 파일명(basename) 표기
-#     * Load A/B(파일) 시 Summary 상단에 "[File] <filename>" 라인 추가
-#     * Compare Now 결과 라벨/그래프에도 A/B 파일명(또는 'Pasted') 표기
-# - (Keep) Summary A/B: 파일 결과 자동 채움 + 사용자 붙여넣기 지원
-# - (Keep) Compare Now 버튼: Summary A/B 텍스트를 다시 파싱하여 Mean/Delta/그래프 갱신
-# - (Keep) matplotlib 없이 Tkinter Canvas 그래프
+# Release Notes (v1.5.0):
+# - (Feature) Compare 그래프 모드 추가:
+#     * Mean Bar: A/B 평균 막대 비교 + Delta(%)
+#     * Series Line: Ping-AvgResult 개별 값들을 A/B 시계열(라인)로 그래프화
+# - (Keep) Summary A/B: 파일 로드 시 dumpState 파일명([File] <name>) 자동 표기
+# - (Keep) Summary A/B: 사용자가 과거 결과물 붙여넣기 후 Compare Now로 비교 가능
+# - (Keep) matplotlib 없이 Tkinter Canvas로 그래프 렌더링
 # ============================================================
 
 import re
@@ -40,14 +40,10 @@ REQ_NORM_RE  = re.compile(r"Ping-[Rr]equest")
 RESP_NORM_RE = re.compile(r"Ping-[Rr]esponse")
 
 # ------------------------------------------------------------
-# Regex for parsing pasted summary text (more permissive)
+# Regex for parsing pasted summary text (permissive)
 # ------------------------------------------------------------
-# - Lines containing "Ping-AvgResult" are collected.
-# - Numeric value is extracted if present after '=' or whitespace.
 PASTE_AVG_LINE_RE = re.compile(r"Ping-AvgResult\b.*", re.IGNORECASE)
 PASTE_AVG_VALUE_RE = re.compile(r"Ping-AvgResult\b.*?(?:=|\s)(?P<val>[\d.]+)\b", re.IGNORECASE)
-
-# Detect optional file header line (we add this when loading)
 PASTE_FILE_HEADER_RE = re.compile(r"^\[File\]\s+(?P<name>.+?)\s*$", re.IGNORECASE)
 
 
@@ -145,17 +141,17 @@ def summarize_avgresults(rows):
 
 def summarize_from_text(text: str):
     """
-    Parse Summary text (pasted or loaded) and extract:
+    Parse Summary text and extract:
       - optional file header: [File] xxx
-      - Ping-AvgResult lines and numeric values
+      - Ping-AvgResult lines and numeric values (order preserved)
     Returns:
       - source_name: str (file name if present else 'Pasted')
-      - lines: list[str] (AvgResult lines)
-      - values: list[float]
+      - avg_lines: list[str]
+      - values: list[float]  (order preserved)
       - mean: float|None
     """
     source_name = "Pasted"
-    lines = []
+    avg_lines = []
     values = []
 
     for raw_line in text.splitlines():
@@ -171,7 +167,7 @@ def summarize_from_text(text: str):
         if not PASTE_AVG_LINE_RE.search(line):
             continue
 
-        lines.append(line)
+        avg_lines.append(line)
 
         mv = PASTE_AVG_VALUE_RE.search(line)
         if mv:
@@ -180,17 +176,21 @@ def summarize_from_text(text: str):
                 values.append(v)
 
     mean_val = (sum(values) / len(values)) if values else None
-    return source_name, lines, values, mean_val
+    return source_name, avg_lines, values, mean_val
 
 
 # ------------------------------------------------------------
-# Canvas bar chart (no external libs)
+# Canvas Drawing (No external libs)
 # ------------------------------------------------------------
-def draw_bar_chart(a_mean, b_mean, delta_pct, a_name, b_name):
-    chart.delete("all")
-
+def _canvas_dims():
     w = int(chart.winfo_width() or 900)
-    h = int(chart.winfo_height() or 200)
+    h = int(chart.winfo_height() or 220)
+    return w, h
+
+
+def draw_mean_bar(a_mean, b_mean, delta_pct, a_name, b_name):
+    chart.delete("all")
+    w, h = _canvas_dims()
 
     pad = 20
     base_y = h - 50
@@ -200,19 +200,16 @@ def draw_bar_chart(a_mean, b_mean, delta_pct, a_name, b_name):
     chart.create_line(pad, base_y, pad, top_y)
 
     if a_mean is None or b_mean is None:
-        chart.create_text(
-            w // 2, h // 2,
-            text="Paste/Load both Summary A and Summary B, then click 'Compare Now'"
-        )
+        chart.create_text(w // 2, h // 2, text="Load/Paste both A and B, then Compare Now")
         return
 
     max_val = max(a_mean, b_mean)
     if max_val <= 0:
         max_val = 1.0
 
-    bar_w = 140
-    gap = 120
-    x_a = pad + 120
+    bar_w = 160
+    gap = 140
+    x_a = pad + 140
     x_b = x_a + bar_w + gap
 
     def bar_height(v):
@@ -225,7 +222,6 @@ def draw_bar_chart(a_mean, b_mean, delta_pct, a_name, b_name):
     chart.create_rectangle(x_a, base_y - ha, x_a + bar_w, base_y, outline="")
     chart.create_rectangle(x_b, base_y - hb, x_b + bar_w, base_y, outline="")
 
-    # X labels with source names
     chart.create_text(x_a + bar_w/2, base_y + 15, text=f"A: {a_name}")
     chart.create_text(x_b + bar_w/2, base_y + 15, text=f"B: {b_name}")
 
@@ -234,6 +230,110 @@ def draw_bar_chart(a_mean, b_mean, delta_pct, a_name, b_name):
 
     if delta_pct is not None:
         chart.create_text(w // 2, 12, text=f"Delta: {delta_pct:+.2f}% (B vs A)")
+
+
+def draw_series_line(a_vals, b_vals, a_name, b_name):
+    """
+    Draw two series (A/B) as line plots on the same axes.
+    - X axis: index (1..N)
+    - Y axis: value
+    """
+    chart.delete("all")
+    w, h = _canvas_dims()
+
+    pad_l = 60
+    pad_r = 20
+    pad_t = 20
+    pad_b = 50
+
+    left = pad_l
+    right = w - pad_r
+    top = pad_t
+    bottom = h - pad_b
+
+    # axes
+    chart.create_line(left, bottom, right, bottom)
+    chart.create_line(left, bottom, left, top)
+
+    if not a_vals and not b_vals:
+        chart.create_text(w // 2, h // 2, text="No numeric AvgResult values found in A/B")
+        return
+
+    # combine to find scale
+    all_vals = []
+    if a_vals:
+        all_vals += a_vals
+    if b_vals:
+        all_vals += b_vals
+
+    vmin = min(all_vals)
+    vmax = max(all_vals)
+    if vmax == vmin:
+        # expand a little to avoid division by zero and show something
+        vmax = vmin + 1.0
+
+    # x range uses the max length
+    n = max(len(a_vals), len(b_vals), 2)
+
+    def x_pos(i):  # i: 0..n-1
+        return left + (i / (n - 1)) * (right - left)
+
+    def y_pos(v):
+        # higher v => higher on plot (smaller y)
+        return bottom - ((v - vmin) / (vmax - vmin)) * (bottom - top)
+
+    # grid ticks (simple)
+    for k in range(5):
+        y = top + (k / 4) * (bottom - top)
+        chart.create_line(left - 5, y, left + 5, y)
+        val = vmax - (k / 4) * (vmax - vmin)
+        chart.create_text(left - 10, y, text=f"{val:.2f}", anchor="e")
+
+    # legend text (no color reliance; use labels and different marker shapes)
+    chart.create_text(left + 5, bottom + 25, text=f"A: {a_name} (o markers)", anchor="w")
+    chart.create_text(left + 5, bottom + 40, text=f"B: {b_name} (□ markers)", anchor="w")
+
+    # plot series helper
+    def plot(vals, marker="circle"):
+        if not vals:
+            return
+        pts = []
+        for i, v in enumerate(vals):
+            x = x_pos(i if n == len(vals) else i)  # align to start; index-based
+            y = y_pos(v)
+            pts.append((x, y))
+
+        # line
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            chart.create_line(x1, y1, x2, y2)
+
+        # markers
+        for x, y in pts:
+            if marker == "circle":
+                r = 3
+                chart.create_oval(x - r, y - r, x + r, y + r, outline="", fill="")
+                # fill="" -> uses default; outline="" -> minimal; relies on theme.
+                # If fill causes invisibility in some themes, set outline only:
+                # chart.create_oval(..., outline="black")
+            else:
+                r = 3
+                chart.create_rectangle(x - r, y - r, x + r, y + r, outline="")
+
+    # NOTE: Tkinter's fill/outline behavior can vary with theme; we keep it minimal.
+    # If markers are hard to see, we can set explicit outline colors later.
+
+    plot(a_vals, marker="circle")
+    plot(b_vals, marker="square")
+
+    # header
+    chart.create_text((left + right) // 2, 12, text="Ping-AvgResult Series (A/B)")
+
+    # x ticks
+    for k in range(5):
+        i = int(round(k * (n - 1) / 4))
+        x = x_pos(i)
+        chart.create_line(x, bottom - 5, x, bottom + 5)
+        chart.create_text(x, bottom + 15, text=str(i + 1))
 
 
 # ------------------------------------------------------------
@@ -252,16 +352,26 @@ def compare_now():
     label_a_mean.config(text=f"A ({a_name}) Mean: {a_txt}   (n={len(a_vals)})")
     label_b_mean.config(text=f"B ({b_name}) Mean: {b_txt}   (n={len(b_vals)})")
 
+    delta_pct = None
     if a_mean is not None and b_mean is not None and a_mean != 0:
         delta_pct = ((b_mean - a_mean) / a_mean) * 100.0
         label_delta.config(text=f"Delta: {delta_pct:+.2f}%   (B vs A)")
-        draw_bar_chart(a_mean, b_mean, delta_pct, a_name, b_name)
     elif a_mean is not None and b_mean is not None and a_mean == 0:
         label_delta.config(text="Delta: N/A (A mean is 0)")
-        draw_bar_chart(a_mean, b_mean, None, a_name, b_name)
     else:
         label_delta.config(text="Delta: N/A (need numeric AvgResult values in both A and B)")
-        draw_bar_chart(None, None, None, a_name, b_name)
+
+    # draw based on mode
+    mode = chart_mode.get()
+    if mode == "MEAN":
+        draw_mean_bar(a_mean, b_mean, delta_pct, a_name, b_name)
+    else:
+        draw_series_line(a_vals, b_vals, a_name, b_name)
+
+
+def on_mode_change():
+    # Re-render using current content (no auto recompute needed beyond compare_now)
+    compare_now()
 
 
 # ------------------------------------------------------------
@@ -306,7 +416,6 @@ def load_avg_into_summary(which):
     rows = extract_ping_logs(path)
     avg_rows, values, mean_val = summarize_avgresults(rows)
 
-    # Put file header first
     out.insert(tk.END, f"[File] {path.name}\n\n")
 
     for r in avg_rows:
@@ -320,8 +429,8 @@ def load_avg_into_summary(which):
 # UI setup
 # ------------------------------------------------------------
 root = tk.Tk()
-root.title("SpeedTestSKT Ping Comparator (Paste or File, No matplotlib)")
-root.geometry("1100x820")
+root.title("SpeedTestSKT Ping Comparator (Series Graph, No matplotlib)")
+root.geometry("1120x860")
 
 log_a_path = tk.StringVar()
 log_b_path = tk.StringVar()
@@ -369,16 +478,24 @@ label_b_mean.pack(side="left", padx=16)
 label_delta = tk.Label(actions, text="Delta: N/A")
 label_delta.pack(side="left", padx=16)
 
-chart = tk.Canvas(frame_comp, height=200)
+# Chart mode selection
+mode_frame = tk.Frame(frame_comp)
+mode_frame.pack(fill="x", padx=8, pady=(0, 6))
+
+chart_mode = tk.StringVar(value="MEAN")
+tk.Radiobutton(mode_frame, text="Mean Bar", variable=chart_mode, value="MEAN", command=on_mode_change).pack(side="left")
+tk.Radiobutton(mode_frame, text="Series Line (each AvgResult)", variable=chart_mode, value="SERIES", command=on_mode_change).pack(side="left", padx=12)
+
+chart = tk.Canvas(frame_comp, height=230)
 chart.pack(fill="x", padx=8, pady=(0, 10))
 
 def _on_chart_resize(_evt):
-    # keep last compare view if present; otherwise placeholder
+    # keep current mode render
     compare_now()
 
 chart.bind("<Configure>", _on_chart_resize)
 
 # initial placeholder
-draw_bar_chart(None, None, None, "A", "B")
+draw_mean_bar(None, None, None, "A", "B")
 
 root.mainloop()
